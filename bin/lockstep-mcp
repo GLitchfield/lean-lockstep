@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# MCP server launcher (stdio).  Needs the `mcp` package: uv pip install -e "tools/lockstep[mcp]".
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LOCKSTEP_PROJECT_ROOT="${LOCKSTEP_PROJECT_ROOT:-$(cd "$here/../../.." && pwd)}"
+if [ -x "$here/../.venv/bin/python" ]; then
+  exec "$here/../.venv/bin/python" -m lockstep.mcp_server "$@"
+fi
+PYTHONPATH="$here/..${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m lockstep.mcp_server "$@"

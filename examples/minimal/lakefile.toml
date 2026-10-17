@@ -1,0 +1,13 @@
+name = "demo"
+version = "0.1.0"
+defaultTargets = ["DemoCore"]
+
+# The core library: proved results only, no `sorry`.
+[[lean_lib]]
+name = "DemoCore"
+roots = ["Demo"]
+
+# The blueprint: one module per open statement (node), maintained by `lockstep node add`.
+[[lean_lib]]
+name = "DemoBlueprint"
+roots = ["DemoBlueprint"]

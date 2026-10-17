@@ -1,0 +1,362 @@
+/-
+lockstep extractor.  Materialized from the harness's Extract.lean.tmpl by `lockstep extract`;
+do not edit the materialized copy.
+
+  lake env lean --run {{SCRIPT}} --out NODES --index INDEX [--prefix P]... \
+      [--destinations-file F] [--index-modules-file F] [--taint-dir D] [--standard A]... [--import M]...
+
+Writes two JSON files:
+  NODES  : every declaration of the blueprint modules (prefix P) and every
+           destination theorem, with docstring, pretty type, type hash, the
+           constants its value uses, and its axioms.
+  INDEX  : name/module/docstring/type of every declaration of the listed
+           modules (for `lockstep search` and duplicate detection).
+
+Axioms are computed by a module-order taint propagation (each module's proof
+terms are read once, sequentially) rather than `#print axioms`, whose
+depth-first walk thrashes on multi-gigabyte certificate modules.  Only
+non-standard axioms are tracked; standard ones (--standard) are assumed for
+every proved constant.  Per-module results are cached in --taint-dir keyed on
+the module's olean hash, so unchanged modules are never rescanned.
+-/
+import Lean
+-- The project modules are imported by `main` (see --import / the default list below), never
+-- at the top of this file: a second load of already-mapped oleans cannot mmap and is read
+-- into anonymous memory instead (tens of GB for the certificate families).
+open Lean Meta
+
+structure Args where
+  out : String := "nodes.json"
+  index : String := "index.json"
+  prefixes : Array Name := #[]
+  destinations : Array Name := #[]
+  indexModules : Array Name := #[]
+  taintDir : Option String := none
+  standard : Array Name := #[]
+  imports : Array Name := #[]
+  noTaint : Bool := false
+
+partial def parseArgs : List String → Args → IO Args
+  | [], a => pure a
+  | "--out" :: v :: rest, a => parseArgs rest { a with out := v }
+  | "--index" :: v :: rest, a => parseArgs rest { a with index := v }
+  | "--prefix" :: v :: rest, a => parseArgs rest { a with prefixes := a.prefixes.push v.toName }
+  | "--destination" :: v :: rest, a => parseArgs rest { a with destinations := a.destinations.push v.toName }
+  | "--destinations-file" :: v :: rest, a => do
+      let lines ← readNames v
+      parseArgs rest { a with destinations := a.destinations ++ lines }
+  | "--index-modules-file" :: v :: rest, a => do
+      let lines ← readNames v
+      parseArgs rest { a with indexModules := a.indexModules ++ lines }
+  | "--taint-dir" :: v :: rest, a => parseArgs rest { a with taintDir := some v }
+  | "--standard" :: v :: rest, a => parseArgs rest { a with standard := a.standard.push v.toName }
+  | "--import" :: v :: rest, a => parseArgs rest { a with imports := a.imports.push v.toName }
+  | "--no-taint" :: rest, a => parseArgs rest { a with noTaint := true }
+  | x :: _, _ => throw <| IO.userError s!"lockstep-extract: unknown argument {x}"
+where
+  readNames (path : String) : IO (Array Name) := do
+    let text ← IO.FS.readFile path
+    let mut out := #[]
+    for line in text.splitOn "\n" do
+      let l := (line.splitOn "#").head!.trimAscii.copy
+      if l != "" then out := out.push l.toName
+    return out
+
+/-! ## Axiom taint -/
+
+structure Taint where
+  axioms : Array Name := #[]
+  axiomIdx : Std.HashMap Name Nat := {}
+  taint : Std.HashMap Name UInt64 := {}
+  standard : Std.HashSet Name := {}
+  scanned : Nat := 0
+  scannedModules : Nat := 0
+  cachedModules : Nat := 0
+  deriving Inhabited
+
+def Taint.axiomBit (a : Taint) (n : Name) : Taint × UInt64 :=
+  match a.axiomIdx[n]? with
+  | some i => (a, (1 : UInt64) <<< i.toUInt64)
+  | none =>
+    let i := a.axioms.size
+    if i ≥ 64 then panic! "lockstep-extract: more than 64 distinct non-standard axioms" else
+    ({ a with axioms := a.axioms.push n, axiomIdx := a.axiomIdx.insert n i }, (1 : UInt64) <<< i.toUInt64)
+
+def Taint.names (a : Taint) (mask : UInt64) : Array Name :=
+  (Array.range a.axioms.size).filterMap fun i =>
+    if (mask >>> i.toUInt64) &&& 1 == 1 then some a.axioms[i]! else none
+
+/-- Resolve every constant of one module; returns the constants of this module
+with a non-zero (non-standard) mask. -/
+def processModule (consts : Array ConstantInfo) (a : Taint) : Taint × Array (Name × UInt64) := Id.run do
+  let mut a := a
+  let mut found : Array (Name × UInt64) := #[]
+  let mut localConsts : Std.HashMap Name ConstantInfo := {}
+  for ci in consts do
+    localConsts := localConsts.insert ci.name ci
+  let mut visited : Std.HashSet Name := {}
+  let mut deps : Std.HashMap Name (Array Name) := {}
+  for ci in consts do
+    if visited.contains ci.name then continue
+    let mut stack : Array Name := #[ci.name]
+    let mut inProgress : Std.HashSet Name := {}
+    while !stack.isEmpty do
+      let top := stack.back!
+      if visited.contains top then
+        stack := stack.pop
+        continue
+      let some info := localConsts[top]? | do
+        visited := visited.insert top
+        stack := stack.pop
+        continue
+      let used ← match deps[top]? with
+        | some u => pure u
+        | none =>
+          let u := info.getUsedConstantsAsSet.toArray.filter (· != top)
+          deps := deps.insert top u
+          pure u
+      let pending := used.filter fun d => !visited.contains d && !inProgress.contains d && localConsts.contains d
+      if pending.isEmpty then
+        let mut mask : UInt64 := 0
+        if info matches .axiomInfo _ then
+          if !a.standard.contains top then
+            let (a', bit) := a.axiomBit top
+            a := a'; mask := mask ||| bit
+        for d in used do
+          if let some t := a.taint[d]? then mask := mask ||| t
+        visited := visited.insert top
+        a := { a with scanned := a.scanned + 1 }
+        if mask != 0 then
+          a := { a with taint := a.taint.insert top mask }
+          found := found.push (top, mask)
+        inProgress := inProgress.erase top
+        deps := deps.erase top
+        stack := stack.pop
+      else
+        inProgress := inProgress.insert top
+        for d in pending do stack := stack.push d
+  return (a, found)
+
+def moduleKey (mod : Name) : IO String := do
+  let olean ← findOLean mod
+  let hashFile := System.FilePath.mk (olean.toString ++ ".hash")
+  if ← hashFile.pathExists then
+    return (← IO.FS.readFile hashFile).trimAscii.copy
+  let md ← olean.metadata
+  return s!"{md.byteSize}:{md.modified.sec}"
+
+def cachePath (dir : String) (mod : Name) : System.FilePath :=
+  System.FilePath.mk dir / (mod.toString ++ ".json")
+
+def loadCache (dir : String) (mod : Name) (key : String) : IO (Option (Array (Array Name × Array Name))) := do
+  let p := cachePath dir mod
+  unless ← p.pathExists do return none
+  let text ← IO.FS.readFile p
+  match Json.parse text with
+  | .error _ => return none
+  | .ok j =>
+    let some h := (j.getObjVal? "hash").toOption >>= (·.getStr?.toOption) | return none
+    if h != key then return none
+    let some groups := (j.getObjVal? "tainted").toOption >>= (·.getArr?.toOption) | return none
+    let mut out := #[]
+    for g in groups do
+      let some arr := g.getArr?.toOption | return none
+      if arr.size != 2 then return none
+      let some axs := arr[0]!.getArr?.toOption | return none
+      let some names := arr[1]!.getArr?.toOption | return none
+      let axs := axs.filterMap fun x => (x.getStr?.toOption).map String.toName
+      let names := names.filterMap fun x => (x.getStr?.toOption).map String.toName
+      out := out.push (axs, names)
+    return some out
+
+def writeCache (dir : String) (mod : Name) (key : String) (a : Taint) (found : Array (Name × UInt64)) : IO Unit := do
+  let mut byMask : Std.HashMap UInt64 (Array Name) := {}
+  for (n, m) in found do
+    byMask := byMask.insert m ((byMask.getD m #[]).push n)
+  let groups : Array Json := byMask.toArray.map fun (m, names) =>
+    Json.arr #[Json.arr ((a.names m).map fun n => Json.str n.toString), Json.arr (names.map fun n => Json.str n.toString)]
+  let j := Json.mkObj [("module", Json.str mod.toString), ("hash", Json.str key), ("tainted", Json.arr groups)]
+  IO.FS.createDirAll (System.FilePath.mk dir)
+  IO.FS.writeFile (cachePath dir mod) j.compress
+
+def Taint.addCached (a : Taint) (entries : Array (Array Name × Array Name)) : Taint := Id.run do
+  let mut a := a
+  for (axs, names) in entries do
+    let mut mask : UInt64 := 0
+    for ax in axs do
+      let (a', bit) := a.axiomBit ax
+      a := a'; mask := mask ||| bit
+    for n in names do
+      a := { a with taint := a.taint.insert n mask }
+  return a
+
+def computeTaint (env : Environment) (args : Args) : IO Taint := do
+  let header := env.header
+  let mut a : Taint := { standard := Std.HashSet.ofArray args.standard }
+  let names := header.moduleNames
+  let n := header.moduleData.size
+  IO.eprintln s!"lockstep-extract: {n} modules in the environment"
+  for i in [0:n] do
+    let modName := names[i]!
+    let data := header.moduleData[i]!
+    let mut hit := false
+    if let some dir := args.taintDir then
+      let key ← moduleKey modName
+      if let some entries ← loadCache dir modName key then
+        a := a.addCached entries
+        a := { a with cachedModules := a.cachedModules + 1 }
+        hit := true
+      else
+        let (a', found) := processModule data.constants a
+        a := { a' with scannedModules := a'.scannedModules + 1 }
+        writeCache dir modName key a found
+        hit := true
+    if !hit then
+      let (a', _) := processModule data.constants a
+      a := { a' with scannedModules := a'.scannedModules + 1 }
+    if (i + 1) % 250 == 0 || i + 1 == n then
+      IO.eprintln s!"lockstep-extract: {i + 1}/{n} modules ({a.cachedModules} cached, {a.scannedModules} scanned, {a.scanned} constants, {a.axioms.size} non-standard axioms)"
+  return a
+
+/-! ## Records -/
+
+def isDetail (n : Name) : Bool :=
+  n.isInternal || n.isInternalDetail || (n.components.any fun c =>
+    let s := c.toString
+    s.startsWith "match_" || s.startsWith "proof_" || s.startsWith "eq_" || s.startsWith "_")
+
+def kindOf : ConstantInfo → String
+  | .axiomInfo _ => "axiom"
+  | .defnInfo _ => "def"
+  | .thmInfo _ => "theorem"
+  | .opaqueInfo _ => "opaque"
+  | .quotInfo _ => "quot"
+  | .inductInfo _ => "inductive"
+  | .ctorInfo _ => "constructor"
+  | .recInfo _ => "recursor"
+
+def typeHash (ci : ConstantInfo) : String :=
+  let h := mixHash ci.type.hash (hash ci.levelParams)
+  String.ofList (Nat.toDigits 16 h.toNat)
+
+def moduleOf (env : Environment) (n : Name) : String :=
+  match env.getModuleIdxFor? n with
+  | some idx => env.header.moduleNames[idx.toNat]!.toString
+  | none => ""
+
+def underPrefix (prefixes : Array Name) (m : Name) : Bool :=
+  prefixes.any fun p => p.isPrefixOf m
+
+def ppType (ci : ConstantInfo) : MetaM String := do
+  try
+    let fmt ← ppExpr ci.type
+    return fmt.pretty 100
+  catch _ => return "<pp failed>"
+
+/-- The constants `n`'s value uses, looking through `n`'s own auxiliary declarations
+(`n._proof_1`, `n.match_1`, ...): the elaborator abstracts parts of a proof into them, which
+would otherwise hide the lemmas the proof really uses. -/
+def usedConstants (env : Environment) (n : Name) (v : Expr) : Array Name := Id.run do
+  let mut out : Array Name := #[]
+  let mut seen : NameSet := {}
+  let mut todo := v.getUsedConstants
+  repeat
+    match todo.back? with
+    | none => break
+    | some d =>
+      todo := todo.pop
+      unless seen.contains d do
+        seen := seen.insert d
+        let aux := if n.isPrefixOf d && isDetail d then (env.find? d).bind (·.value? (allowOpaque := true)) else none
+        match aux with
+        | some w => todo := todo ++ w.getUsedConstants
+        | none => out := out.push d
+  return out
+
+def record (env : Environment) (a : Taint) (args : Args) (ci : ConstantInfo) (tyPP : String) (withAxioms : Bool) : IO Json := do
+  let n := ci.name
+  let doc ← findDocString? env n
+  let mask := a.taint.getD n 0
+  let nonStd := (a.names mask).map (·.toString)
+  let hasValue := ci.value?.isSome || (ci matches .thmInfo _)
+  let axioms : Array String :=
+    if !withAxioms then #[] else
+    if ci matches .axiomInfo _ then #[n.toString] else
+    (if hasValue then args.standard.map (·.toString) else #[]) ++ nonStd
+  let deps : Array Name := match ci.value? (allowOpaque := true) with
+    | some v => usedConstants env n v
+    | none => #[]
+  let depNames := deps.filter fun d =>
+    args.destinations.contains d || underPrefix args.prefixes (moduleOf env d).toName
+  return Json.mkObj [
+    ("name", Json.str n.toString),
+    ("module", Json.str (moduleOf env n)),
+    ("kind", Json.str (kindOf ci)),
+    ("doc", match doc with | some d => Json.str d | none => Json.null),
+    ("type_pp", Json.str tyPP),
+    ("type_hash", Json.str (typeHash ci)),
+    ("sorry", Json.bool (nonStd.contains "sorryAx")),
+    ("axioms", Json.arr (axioms.map Json.str)),
+    ("nonstandard_axioms", Json.arr (nonStd.map Json.str)),
+    ("deps", Json.arr (depNames.map fun d => Json.str d.toString)),
+    ("internal", Json.bool (isDetail n))
+  ]
+
+def main (argv : List String) : IO Unit := do
+  let args ← parseArgs argv {}
+  initSearchPath (← findSysroot)
+  let imports := if args.imports.isEmpty then #[{{DEFAULT_IMPORTS}}] else args.imports
+  let start ← IO.monoMsNow
+  let env ← importModules (imports.map fun m => { module := m, importAll := false }) {} 0
+  IO.eprintln s!"lockstep-extract: imported {env.header.moduleData.size} modules in {(← IO.monoMsNow) - start} ms"
+  let taint ← if args.noTaint then pure {} else computeTaint env args
+  IO.eprintln s!"lockstep-extract: non-standard axioms seen: {taint.axioms}"
+  -- blueprint constants: every constant of every module under a prefix
+  let mut blueprint : Array ConstantInfo := #[]
+  let header := env.header
+  for i in [0:header.moduleData.size] do
+    if underPrefix args.prefixes header.moduleNames[i]! then
+      for ci in header.moduleData[i]!.constants do
+        if !ci.isUnsafe then blueprint := blueprint.push ci
+  let mut dests : Array ConstantInfo := #[]
+  let mut missing : Array String := #[]
+  for d in args.destinations do
+    match env.find? d with
+    | some ci => dests := dests.push ci
+    | none => missing := missing.push d.toString
+  let indexSet := Std.HashSet.ofArray args.indexModules
+  let mut indexed : Array ConstantInfo := #[]
+  for i in [0:header.moduleData.size] do
+    if indexSet.contains header.moduleNames[i]! then
+      for ci in header.moduleData[i]!.constants do
+        if !ci.isUnsafe && !isDetail ci.name then
+          match ci with
+          | .thmInfo _ | .defnInfo _ | .axiomInfo _ | .opaqueInfo _ | .inductInfo _ => indexed := indexed.push ci
+          | _ => pure ()
+  IO.eprintln s!"lockstep-extract: {blueprint.size} blueprint constants, {dests.size} destinations, {indexed.size} indexed declarations"
+  let ctx : Core.Context := { fileName := "lockstep-extract", fileMap := default, maxHeartbeats := 0 }
+  let all := blueprint ++ dests ++ indexed
+  let (pps, _, _) ← (all.mapM ppType).toIO ctx { env := env }
+  let mut i := 0
+  let mut bpJson : Array Json := #[]
+  for ci in blueprint do
+    bpJson := bpJson.push (← record env taint args ci pps[i]! true); i := i + 1
+  let mut destJson : Array Json := #[]
+  for ci in dests do
+    destJson := destJson.push (← record env taint args ci pps[i]! true); i := i + 1
+  let mut idxJson : Array Json := #[]
+  for ci in indexed do
+    idxJson := idxJson.push (← record env taint args ci pps[i]! false); i := i + 1
+  let toolchain ← (do return (← IO.FS.readFile "lean-toolchain").trimAscii.copy) <|> pure ""
+  let nodes := Json.mkObj [
+    ("toolchain", Json.str toolchain),
+    ("modules", Json.num header.moduleData.size),
+    ("nonstandard_axioms", Json.arr (taint.axioms.map fun n => Json.str n.toString)),
+    ("taint", Json.mkObj [("cached_modules", Json.num taint.cachedModules), ("scanned_modules", Json.num taint.scannedModules), ("scanned_constants", Json.num taint.scanned)]),
+    ("missing_destinations", Json.arr (missing.map Json.str)),
+    ("declarations", Json.arr bpJson),
+    ("destinations", Json.arr destJson)
+  ]
+  IO.FS.writeFile args.out nodes.compress
+  IO.FS.writeFile args.index (Json.arr idxJson).compress
+  IO.eprintln s!"lockstep-extract: wrote {args.out} and {args.index} in {(← IO.monoMsNow) - start} ms"

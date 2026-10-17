@@ -1,0 +1,56 @@
+[project]
+name = "lean-lockstep"
+dynamic = ["version"]
+description = "Coordinate several agents on a Lean 4 formalization: state derived from the compiled environment, locked statements, recorded claims and memory-guarded jobs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gavin Litchfield" }]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["lean4", "formalization", "theorem-proving", "blueprint", "ai-agents", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.urls]
+Homepage = "https://github.com/GLitchfield/lean-lockstep"
+Repository = "https://github.com/GLitchfield/lean-lockstep"
+Issues = "https://github.com/GLitchfield/lean-lockstep/issues"
+Changelog = "https://github.com/GLitchfield/lean-lockstep/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+test = ["pytest"]
+research = ["numpy"]
+
+[project.scripts]
+lockstep = "lockstep.cli:main"
+lockstep-mcp = "lockstep.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "lockstep.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lockstep*"]
+
+[tool.setuptools.package-data]
+lockstep = ["data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

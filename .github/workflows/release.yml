@@ -1,0 +1,41 @@
+name: release
+
+# Push a tag vX.Y.Z whose version matches lockstep/__init__.py. Publishing uses PyPI trusted
+# publishing: the PyPI project lists this repository, this workflow and the `pypi` environment
+# as a trusted publisher, so no token is stored here.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tag matches the package version
+        run: |
+          version=$(python3 -c 'import ast; print(next(n.value.value for n in ast.parse(open("lockstep/__init__.py").read()).body if isinstance(n, ast.Assign) and n.targets[0].id == "__version__"))')
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - run: python3 -m pip install build twine
+      - run: python3 -m build
+      - run: python3 -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

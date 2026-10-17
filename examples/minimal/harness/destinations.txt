@@ -1,0 +1,2 @@
+# Core-library theorems included in the axiom audit and the frontier (one per line).
+# `lockstep close` appends every closed node automatically.

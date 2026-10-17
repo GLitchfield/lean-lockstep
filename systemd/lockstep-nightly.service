@@ -1,0 +1,11 @@
+# Template: systemd/install.sh fills in @ROOT@, @LOG_DIR@ and @PROJECT@ for one project.
+[Unit]
+Description=lockstep nightly for @PROJECT@: guarded core build, extract consistency check, axiom audit
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+Environment=LOCKSTEP_AGENT=lockstep-nightly
+ExecStart=/bin/bash -lc '@LOCKSTEP@ build core --budget 300 && @LOCKSTEP@ extract --check && @LOCKSTEP@ audit'
+StandardOutput=append:@LOG_DIR@/nightly.log
+StandardError=append:@LOG_DIR@/nightly.log

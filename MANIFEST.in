@@ -1,0 +1,10 @@
+# The sdist carries what the tests and the docs refer to.
+include CHANGELOG.md
+graft docs
+graft examples
+graft bin
+graft systemd
+graft tests
+prune examples/*/.lake
+prune examples/*/.lockstep
+global-exclude __pycache__ *.py[cod]

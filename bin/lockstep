@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Launcher: prefer the tools/lockstep virtualenv, fall back to the system python3 (core has no dependencies).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$here/../.venv/bin/python" ]; then
+  exec "$here/../.venv/bin/python" -m lockstep "$@"
+fi
+PYTHONPATH="$here/..${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m lockstep "$@"

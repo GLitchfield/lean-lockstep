@@ -1,0 +1,48 @@
+# lockstep configuration for the minimal example. Everything project-specific lives here.
+
+[project]
+id = "demo"                            # keys <state_home>/<id>/lockstep.db
+state_home = ".lockstep"               # harness state inside the checkout (gitignore it)
+blueprint_namespace = "DemoBlueprint"  # module prefix of node modules
+blueprint_root = "DemoBlueprint.lean"
+core_namespace = "Demo"                # Lean namespace of node declarations and of the core library
+core_root_module = "Demo"
+closed_target_default = "Demo.Closed"  # where `lockstep close` moves proved nodes
+workstreams = ["A"]
+
+[layers]
+order = ["DemoCore", "DemoBlueprint"]  # the core may not import the blueprint
+core = "DemoCore"
+blueprint = "DemoBlueprint"
+
+[layers.DemoCore]
+prefixes = ["Demo"]
+
+[layers.DemoBlueprint]
+prefixes = ["DemoBlueprint"]
+exclude_from_root = ["DemoBlueprint.Extract"]
+
+[audit]
+standard_axioms = ["propext", "Classical.choice", "Quot.sound"]
+
+[build]
+# true runs every lake invocation in a memory-capped systemd user scope (Linux);
+# false runs lake directly, for machines without a systemd user session.
+guard = false
+memory_max = "4G"
+
+[build.targets]
+core = ["DemoCore"]
+blueprint = ["DemoBlueprint"]
+
+[extract]
+script = "DemoBlueprint/Extract.lean"  # written from the harness's Extract.lean.tmpl
+imports = ["DemoBlueprint", "Demo"]
+index_layers = ["DemoCore"]
+
+[node]
+default_import = "Demo"
+
+[rules]
+files = ["AGENTS.md"]                  # list CLAUDE.md here too to keep both in step
+require = ["lockstep claim", "lockstep release"]

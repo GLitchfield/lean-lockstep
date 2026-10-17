@@ -1,0 +1,28 @@
+"""Importing this package registers every command with :mod:`lockstep.spec`."""
+
+from lockstep.commands import (  # noqa: F401
+    audit,
+    build,
+    cache,
+    claims,
+    check,
+    close,
+    doctor,
+    extract,
+    falsify,
+    jobs,
+    layers,
+    lock,
+    log,
+    node,
+    note,
+    ready,
+    rules,
+    search,
+    status,
+    automation,
+    proof,
+    probe,
+    index,
+    library,
+)
