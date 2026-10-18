@@ -3,7 +3,7 @@
 All notable changes are listed here. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may break compatibility.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-18)
 
 First public release. Extracted from the harness of two Lean research projects and generalized.
 
