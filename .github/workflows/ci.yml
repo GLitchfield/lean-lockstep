@@ -23,7 +23,7 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - run: pip install -e ".[test,research]"
+      - run: pip install -e ".[test,research,mcp]"
       - run: pytest -q
 
   package:
