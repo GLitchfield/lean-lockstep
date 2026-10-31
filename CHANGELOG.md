@@ -3,6 +3,14 @@
 All notable changes are listed here. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may break compatibility.
 
+## Unreleased
+
+- MCP: a command that fails (`"ok": false`) now returns `isError: true`, so clients and gateways
+  that count failures by the flag see it. The JSON envelope in the text is unchanged.
+- MCP: each argument's help text is now the `description` of its property in the tool's input
+  schema. Before, it was dropped, and models saw arguments such as `why` with no explanation.
+- CI installs the `mcp` extra so the MCP server tests run.
+
 ## 0.1.0 (2026-10-18)
 
 First public release. Extracted from the harness of two Lean research projects and generalized.

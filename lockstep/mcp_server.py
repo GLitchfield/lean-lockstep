@@ -61,6 +61,40 @@ def _make_tool(spec: CommandSpec):
     return tool
 
 
+def _mcp_tool(spec: CommandSpec):
+    """Wrap ``_make_tool`` for the MCP SDK.
+
+    Two things the plain dict tool cannot say on the wire: a failed command (``ok`` false) is
+    returned with ``isError: true``, so clients and gateways that count failures see it, and each
+    argument's help text becomes the ``description`` of its property in the input schema, where
+    the model reads it.  ``_make_tool`` stays free of MCP and pydantic imports for the core tests.
+    """
+    from typing import Annotated
+
+    from mcp.types import CallToolResult
+    from pydantic import Field
+
+    inner = _make_tool(spec)
+    helps = {a.name: a.help for a in spec.args if a.help}
+
+    def tool(**kwargs: Any) -> CallToolResult:
+        envelope = inner(**kwargs)
+        text = json.dumps(envelope, indent=2, ensure_ascii=False, default=str)
+        failed = isinstance(envelope, dict) and envelope.get("ok") is False
+        return CallToolResult.model_validate({"content": [{"type": "text", "text": text}], "isError": failed})
+
+    sig = inspect.signature(inner)
+    params = [
+        p.replace(annotation=Annotated[p.annotation, Field(description=helps[p.name])]) if p.name in helps else p
+        for p in sig.parameters.values()
+    ]
+    tool.__name__ = spec.name
+    tool.__doc__ = spec.help
+    tool.__signature__ = sig.replace(parameters=params, return_annotation=CallToolResult)  # type: ignore[attr-defined]
+    tool.__annotations__ = {p.name: p.annotation for p in params} | {"return": CallToolResult}
+    return tool
+
+
 def build_server():
     try:
         from mcp.server.mcpserver import MCPServer  # mcp >= 2
@@ -72,7 +106,7 @@ def build_server():
     for spec in REGISTRY:
         if not spec.mcp:
             continue
-        server.tool(name=spec.name, description=spec.help)(_make_tool(spec))
+        server.tool(name=spec.name, description=spec.help)(_mcp_tool(spec))
     return server
 
 
